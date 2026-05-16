@@ -37,6 +37,7 @@ describe("parseCodexFeatureFlag", () => {
     const source = "[features]\ncodex_hooks = true\n";
     expect(parseCodexFeatureFlag(source, "codex_hooks")).toEqual({
       keyPresent: true,
+      key: "codex_hooks",
       value: true,
     });
   });
@@ -45,6 +46,7 @@ describe("parseCodexFeatureFlag", () => {
     const source = "[features]\ncodex_hooks = false\n";
     expect(parseCodexFeatureFlag(source, "codex_hooks")).toEqual({
       keyPresent: true,
+      key: "codex_hooks",
       value: false,
     });
   });
@@ -53,6 +55,16 @@ describe("parseCodexFeatureFlag", () => {
     const source = "features.codex_hooks = true\n[other]\nfoo = 1\n";
     expect(parseCodexFeatureFlag(source, "codex_hooks")).toEqual({
       keyPresent: true,
+      key: "codex_hooks",
+      value: true,
+    });
+  });
+
+  it("parses the modern hooks feature key before the legacy alias", () => {
+    const source = "[features]\nhooks = true\ncodex_hooks = false\n";
+    expect(parseCodexFeatureFlag(source, ["hooks", "codex_hooks"])).toEqual({
+      keyPresent: true,
+      key: "hooks",
       value: true,
     });
   });
@@ -89,8 +101,9 @@ describe("inspectCodexHooksFeatureFlag", () => {
       expect(status.configExists).toBe(false);
       expect(status.keyPresent).toBe(false);
       expect(status.value).toBe(null);
-      expect(status.enabled).toBe(false);
-      expect(status.fixHint).toContain("codex_hooks");
+      expect(status.defaultEnabled).toBe(true);
+      expect(status.enabled).toBe(true);
+      expect(status.fixHint).toBe("");
     });
   });
 
@@ -100,6 +113,7 @@ describe("inspectCodexHooksFeatureFlag", () => {
       const status = await inspectCodexHooksFeatureFlag(configPath);
       expect(status.configExists).toBe(true);
       expect(status.keyPresent).toBe(true);
+      expect(status.key).toBe("codex_hooks");
       expect(status.value).toBe(true);
       expect(status.enabled).toBe(true);
       expect(status.fixHint).toBe("");
@@ -112,9 +126,10 @@ describe("inspectCodexHooksFeatureFlag", () => {
       const status = await inspectCodexHooksFeatureFlag(configPath);
       expect(status.configExists).toBe(true);
       expect(status.keyPresent).toBe(true);
+      expect(status.key).toBe("codex_hooks");
       expect(status.value).toBe(false);
       expect(status.enabled).toBe(false);
-      expect(status.fixHint).toContain("codex_hooks");
+      expect(status.fixHint).toContain("hooks = true");
     });
   });
 
@@ -135,7 +150,7 @@ describe("inspectCodexHooksFeatureFlag", () => {
         expect(status.configExists).toBe(true);
         expect(status.keyPresent).toBe(false);
         expect(status.value).toBe(null);
-        expect(status.enabled).toBe(false);
+        expect(status.enabled).toBe(true);
       } finally {
         await chmod(configPath, 0o644);
       }
@@ -144,15 +159,16 @@ describe("inspectCodexHooksFeatureFlag", () => {
 });
 
 describe("installCodexHook feature-flag surface", () => {
-  it("returns featureFlag.enabled=false when config.toml is missing", async () => {
+  it("returns featureFlag.enabled=true by default when config.toml is missing", async () => {
     await withTempCodexHome(async ({ hooksPath }) => {
       const previousCodexHome = process.env.CODEX_HOME;
       process.env.CODEX_HOME = join(hooksPath, "..");
       try {
         const result = await installCodexHook(hooksPath);
-        expect(result.featureFlag.enabled).toBe(false);
+        expect(result.featureFlag.enabled).toBe(true);
+        expect(result.featureFlag.defaultEnabled).toBe(true);
         expect(result.featureFlag.configExists).toBe(false);
-        expect(result.featureFlag.fixHint).toContain("codex_hooks");
+        expect(result.featureFlag.fixHint).toBe("");
         // sanity: hooks.json was still written as usual
         const hooks = JSON.parse(await readFile(hooksPath, "utf8"));
         expect(hooks.hooks.PostToolUse).toBeDefined();

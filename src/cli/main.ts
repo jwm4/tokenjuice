@@ -505,12 +505,13 @@ async function runInstall(args: ParsedArgs): Promise<number> {
       { label: "Command", value: result.command },
     ];
     if (result.featureFlag.enabled) {
-      details.push({ label: "Feature flag", value: `codex_hooks is enabled (${result.featureFlag.configPath})` });
+      const source = result.featureFlag.key ? `[features].${result.featureFlag.key}` : "default-on";
+      details.push({ label: "Feature flag", value: `hooks enabled via ${source} (${result.featureFlag.configPath})` });
     } else {
       const where = result.featureFlag.configExists
         ? `${result.featureFlag.configPath} (missing or disabled)`
         : `no ${result.featureFlag.configPath}`;
-      details.push({ label: "Feature flag", value: `codex_hooks not enabled - ${where}` });
+      details.push({ label: "Feature flag", value: `hooks disabled - ${where}` });
       details.push({ label: "Enable", value: result.featureFlag.fixHint });
     }
     if (result.backupPath) {
@@ -1237,15 +1238,21 @@ async function runDoctor(args: ParsedArgs): Promise<number> {
       }
     }
     if (report.featureFlag.enabled) {
+      const source = report.featureFlag.key ? `[features].${report.featureFlag.key}` : "default-on";
       process.stdout.write(
-        `feature flag: codex_hooks is enabled (${report.featureFlag.configPath})\n`,
+        `feature flag: hooks enabled via ${source} (${report.featureFlag.configPath})\n`,
       );
     } else {
       const where = report.featureFlag.configExists
         ? `${report.featureFlag.configPath} (missing or disabled)`
         : `no ${report.featureFlag.configPath}`;
-      process.stdout.write(`feature flag: codex_hooks not enabled — ${where}\n`);
+      process.stdout.write(`feature flag: hooks disabled — ${where}\n`);
       process.stdout.write(`   ${report.featureFlag.fixHint}\n`);
+    }
+    if (report.runtimeConfig.configExists) {
+      process.stdout.write(
+        `codex config: approval_policy=${report.runtimeConfig.approvalPolicy ?? "(default)"}, sandbox_mode=${report.runtimeConfig.sandboxMode ?? "(default)"}, approvals_reviewer=${report.runtimeConfig.approvalsReviewer ?? "(default)"}\n`,
+      );
     }
     process.stdout.write(`repair: ${report.fixCommand}\n`);
     return report.status === "broken" ? 1 : 0;

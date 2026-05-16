@@ -14,14 +14,14 @@ import { buildCompactionHint } from "../shared/hook-output.js";
 
 import type { ToolExecutionInput } from "../../types.js";
 
-type CodexHookCommand = {
-  type: "command";
-  command: string;
+type CodexHookCommand = Record<string, unknown> & {
+  type?: string;
+  command?: string;
   statusMessage?: string;
   timeout?: number;
 };
 
-type CodexHookMatcherGroup = {
+type CodexHookMatcherGroup = Record<string, unknown> & {
   matcher?: string;
   hooks: CodexHookCommand[];
 };
@@ -66,11 +66,15 @@ export type CodexFeatureFlagStatus = {
   configPath: string;
   /** Whether the config file exists on disk. */
   configExists: boolean;
-  /** Whether a `codex_hooks` key was found anywhere in `[features]`. */
+  /** Whether a hooks feature key was found anywhere in `[features]`. */
   keyPresent: boolean;
+  /** The feature key that was found. Latest Codex uses `hooks`; `codex_hooks` is a legacy alias. */
+  key?: "hooks" | "codex_hooks";
   /** Parsed value when present, otherwise null. */
   value: boolean | null;
-  /** Convenience: keyPresent && value === true. */
+  /** Whether hooks are enabled by default when no explicit key is present. */
+  defaultEnabled: boolean;
+  /** Convenience: true unless the hooks feature is explicitly disabled. */
   enabled: boolean;
   /**
    * One-line remediation the user can copy-paste. Empty when enabled.
@@ -79,6 +83,16 @@ export type CodexFeatureFlagStatus = {
    * config rewrites).
    */
   fixHint: string;
+};
+
+export type CodexRuntimeConfigStatus = {
+  /** Absolute path we scanned (`~/.codex/config.toml` by default). */
+  configPath: string;
+  /** Whether the config file exists on disk. */
+  configExists: boolean;
+  approvalPolicy: string | null;
+  sandboxMode: string | null;
+  approvalsReviewer: string | null;
 };
 
 export type CodexHookCommandOptions = {
@@ -104,6 +118,7 @@ export type CodexDoctorReport = {
   checkedPaths: string[];
   missingPaths: string[];
   featureFlag: CodexFeatureFlagStatus;
+  runtimeConfig: CodexRuntimeConfigStatus;
 };
 
 export type UninstallCodexHookResult = {
@@ -127,11 +142,10 @@ function getDefaultCodexConfigPath(): string {
   return join(getCodexHome(), "config.toml");
 }
 
-const FEATURE_FLAG_NAME = "codex_hooks";
+const FEATURE_FLAG_NAMES = ["hooks", "codex_hooks"] as const;
 const FEATURE_FLAG_FIX_HINT =
-  "Codex requires the `codex_hooks` feature to load hooks.json. " +
-  "Enable per-invocation with `codex exec --enable codex_hooks ...`, " +
-  "or persistently by adding a `[features]` section with `codex_hooks = true` to ~/.codex/config.toml.";
+  "Codex hooks are disabled. Enable per-invocation with `codex exec --enable hooks ...`, " +
+  "or persistently by adding a `[features]` section with `hooks = true` to ~/.codex/config.toml.";
 
 function buildCodexFeatureFlagStatus(
   configPath: string,
@@ -141,19 +155,21 @@ function buildCodexFeatureFlagStatus(
     configPath,
     configExists,
     keyPresent: false,
+    defaultEnabled: true,
     value: null,
-    enabled: false,
-    fixHint: FEATURE_FLAG_FIX_HINT,
+    enabled: true,
+    fixHint: "",
   };
 }
 
 /**
- * Read-only scan of ~/.codex/config.toml for `codex_hooks = <bool>` under
- * a `[features]` section (top-level or dotted form). Does NOT edit the
- * file — tokenjuice prefers to surface the state and let the user decide.
+ * Read-only scan of ~/.codex/config.toml for the modern `hooks = <bool>`
+ * feature flag or its legacy `codex_hooks = <bool>` alias under a `[features]`
+ * section (top-level or dotted form). Does NOT edit the file — tokenjuice
+ * prefers to surface the state and let the user decide.
  *
- * Returns `keyPresent: false` if the file is missing, unreadable, or the
- * key is not declared. Stray comments and inline `# ...` are tolerated.
+ * Latest Codex enables hooks by default. Returns `enabled: true` when no key is
+ * declared, and `enabled: false` only when the user explicitly disables hooks.
  */
 export async function inspectCodexHooksFeatureFlag(
   configPath: string = getDefaultCodexConfigPath(),
@@ -172,12 +188,14 @@ export async function inspectCodexHooksFeatureFlag(
     throw error;
   }
 
-  const parsed = parseCodexFeatureFlag(source, FEATURE_FLAG_NAME);
-  const enabled = parsed.keyPresent && parsed.value === true;
+  const parsed = parseCodexFeatureFlag(source, FEATURE_FLAG_NAMES);
+  const enabled = parsed.keyPresent ? parsed.value === true : true;
   return {
     configPath,
     configExists: true,
     keyPresent: parsed.keyPresent,
+    ...(parsed.key ? { key: parsed.key } : {}),
+    defaultEnabled: true,
     value: parsed.keyPresent ? parsed.value : null,
     enabled,
     fixHint: enabled ? "" : FEATURE_FLAG_FIX_HINT,
@@ -185,19 +203,21 @@ export async function inspectCodexHooksFeatureFlag(
 }
 
 /**
- * Minimal TOML-ish scanner. Looks for `codex_hooks = <bool>` either under
- * a `[features]` header or as a dotted `features.codex_hooks = <bool>`
- * assignment at any indent. Ignores comments and in-line comments.
+ * Minimal TOML-ish scanner. Looks for feature flags either under a `[features]`
+ * header or as a dotted `features.<key> = <bool>` assignment at any indent.
+ * Ignores comments and in-line comments.
  * Not a full TOML parser; only the shapes Codex itself documents.
  */
 export function parseCodexFeatureFlag(
   source: string,
-  key: string,
-): { keyPresent: boolean; value: boolean | null } {
+  keys: "hooks" | "codex_hooks" | readonly ("hooks" | "codex_hooks")[],
+): { keyPresent: boolean; key?: "hooks" | "codex_hooks"; value: boolean | null } {
   const lines = source.split(/\r?\n/u);
   let currentTablePath: string[] = [];
-  const dottedRe = new RegExp(`^\\s*features\\.${key}\\s*=\\s*(true|false)\\b`, "u");
-  const scopedRe = new RegExp(`^\\s*${key}\\s*=\\s*(true|false)\\b`, "u");
+  const keyList = typeof keys === "string" ? [keys] : keys;
+  const escapedKeys = keyList.join("|");
+  const dottedRe = new RegExp(`^\\s*features\\.(${escapedKeys})\\s*=\\s*(true|false)\\b`, "u");
+  const scopedRe = new RegExp(`^\\s*(${escapedKeys})\\s*=\\s*(true|false)\\b`, "u");
 
   for (const rawLine of lines) {
     const line = rawLine.replace(/#.*$/u, "");
@@ -212,17 +232,98 @@ export function parseCodexFeatureFlag(
     }
     const dotted = currentTablePath.length === 0 ? dottedRe.exec(line) : null;
     if (dotted) {
-      return { keyPresent: true, value: dotted[1] === "true" };
+      return { keyPresent: true, key: dotted[1] as "hooks" | "codex_hooks", value: dotted[2] === "true" };
     }
     if (currentTablePath.length === 1 && currentTablePath[0] === "features") {
       const scoped = scopedRe.exec(line);
       if (scoped) {
-        return { keyPresent: true, value: scoped[1] === "true" };
+        return { keyPresent: true, key: scoped[1] as "hooks" | "codex_hooks", value: scoped[2] === "true" };
       }
     }
   }
 
   return { keyPresent: false, value: null };
+}
+
+export async function inspectCodexRuntimeConfig(
+  configPath: string = getDefaultCodexConfigPath(),
+): Promise<CodexRuntimeConfigStatus> {
+  let source: string;
+  try {
+    source = await readFile(configPath, "utf8");
+  } catch (error: unknown) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") {
+      return {
+        configPath,
+        configExists: false,
+        approvalPolicy: null,
+        sandboxMode: null,
+        approvalsReviewer: null,
+      };
+    }
+    if (code === "EACCES" || code === "EPERM" || code === "EISDIR") {
+      return {
+        configPath,
+        configExists: true,
+        approvalPolicy: null,
+        sandboxMode: null,
+        approvalsReviewer: null,
+      };
+    }
+    throw error;
+  }
+
+  const values = parseCodexRuntimeConfig(source);
+  return {
+    configPath,
+    configExists: true,
+    approvalPolicy: values.approvalPolicy,
+    sandboxMode: values.sandboxMode,
+    approvalsReviewer: values.approvalsReviewer,
+  };
+}
+
+function parseCodexRuntimeConfig(source: string): Omit<CodexRuntimeConfigStatus, "configPath" | "configExists"> {
+  const values: Omit<CodexRuntimeConfigStatus, "configPath" | "configExists"> = {
+    approvalPolicy: null,
+    sandboxMode: null,
+    approvalsReviewer: null,
+  };
+  let currentTablePath: string[] = [];
+
+  for (const rawLine of source.split(/\r?\n/u)) {
+    const line = rawLine.replace(/#.*$/u, "");
+    const header = /^\s*\[([^\]]+)\]/u.exec(line);
+    if (header) {
+      currentTablePath = header[1]!
+        .trim()
+        .split(".")
+        .map((segment) => segment.trim())
+        .filter(Boolean);
+      continue;
+    }
+    if (currentTablePath.length > 0) {
+      continue;
+    }
+
+    const assignment = /^\s*(approval_policy|sandbox_mode|approvals_reviewer)\s*=\s*("[^"]+"|'[^']+'|\{.*|[A-Za-z0-9_-]+)/u.exec(line);
+    if (!assignment) {
+      continue;
+    }
+
+    const rawValue = assignment[2]!.trim();
+    const value = rawValue.startsWith("{") ? "granular" : rawValue.replace(/^["']|["']$/gu, "");
+    if (assignment[1] === "approval_policy") {
+      values.approvalPolicy = value;
+    } else if (assignment[1] === "sandbox_mode") {
+      values.sandboxMode = value;
+    } else {
+      values.approvalsReviewer = value;
+    }
+  }
+
+  return values;
 }
 
 async function isExecutableFile(path: string): Promise<boolean> {
@@ -379,11 +480,12 @@ function createTokenjuiceCodexHook(command: string): CodexHookMatcherGroup {
 }
 
 function isTokenjuiceCodexHook(group: CodexHookMatcherGroup): boolean {
-  return group.hooks.some((hook) =>
-    hook.statusMessage === TOKENJUICE_CODEX_STATUS
-    || hook.command.includes("codex-post-tool-use")
-    || hook.command.includes("post_tool_use_tokenjuice.py"),
-  );
+  return group.hooks.some((hook) => {
+    const command = typeof hook.command === "string" ? hook.command : "";
+    return hook.statusMessage === TOKENJUICE_CODEX_STATUS
+      || command.includes("codex-post-tool-use")
+      || command.includes("post_tool_use_tokenjuice.py");
+  });
 }
 
 function findTokenjuiceCodexHookCommand(config: CodexHooksConfig): string | undefined {
@@ -392,11 +494,12 @@ function findTokenjuiceCodexHookCommand(config: CodexHooksConfig): string | unde
       continue;
     }
 
-    const command = group.hooks.find((hook) =>
-      hook.statusMessage === TOKENJUICE_CODEX_STATUS
-      || hook.command.includes("codex-post-tool-use")
-      || hook.command.includes("post_tool_use_tokenjuice.py"),
-    )?.command;
+    const command = group.hooks.find((hook) => {
+      const hookCommand = typeof hook.command === "string" ? hook.command : "";
+      return hook.statusMessage === TOKENJUICE_CODEX_STATUS
+        || hookCommand.includes("codex-post-tool-use")
+        || hookCommand.includes("post_tool_use_tokenjuice.py");
+    })?.command;
     if (command) {
       return command;
     }
@@ -460,6 +563,9 @@ function collectLowTimeoutWarnings(config: CodexHooksConfig): string[] {
       }
 
       group.hooks.forEach((hook, hookIndex) => {
+        if (typeof hook.command !== "string") {
+          return;
+        }
         if (
           typeof hook.timeout !== "number"
           || !Number.isFinite(hook.timeout)
@@ -497,21 +603,11 @@ function sanitizeHooksConfig(raw: unknown): CodexHooksConfig {
       }
 
       const commands = group.hooks.flatMap((hook): CodexHookCommand[] => {
-        if (!isRecord(hook) || hook.type !== "command" || typeof hook.command !== "string") {
+        if (!isRecord(hook)) {
           return [];
         }
 
-        const normalized: CodexHookCommand = {
-          type: "command",
-          command: hook.command,
-        };
-        if (typeof hook.statusMessage === "string" && hook.statusMessage) {
-          normalized.statusMessage = hook.statusMessage;
-        }
-        if (typeof hook.timeout === "number" && Number.isFinite(hook.timeout)) {
-          normalized.timeout = hook.timeout;
-        }
-        return [normalized];
+        return [{ ...hook } as CodexHookCommand];
       });
 
       if (commands.length === 0) {
@@ -519,6 +615,7 @@ function sanitizeHooksConfig(raw: unknown): CodexHooksConfig {
       }
 
       const normalizedGroup: CodexHookMatcherGroup = {
+        ...group,
         hooks: commands,
       };
       if (typeof group.matcher === "string" && group.matcher) {
@@ -718,6 +815,7 @@ export async function doctorCodexHook(
   const { config, exists } = await readHooksConfig(hooksPath);
   const detectedCommand = findTokenjuiceCodexHookCommand(config);
   const featureFlag = await inspectCodexHooksFeatureFlag(options.featureFlagConfigPath);
+  const runtimeConfig = await inspectCodexRuntimeConfig(options.featureFlagConfigPath);
 
   if (!exists) {
     return {
@@ -729,6 +827,7 @@ export async function doctorCodexHook(
       checkedPaths: [],
       missingPaths: [],
       featureFlag,
+      runtimeConfig,
     };
   }
 
@@ -742,6 +841,7 @@ export async function doctorCodexHook(
       checkedPaths: [],
       missingPaths: [],
       featureFlag,
+      runtimeConfig,
     };
   }
 
@@ -777,7 +877,7 @@ export async function doctorCodexHook(
   }
   if (!featureFlag.enabled) {
     issues.push(
-      "Codex feature flag `codex_hooks` is not enabled — the configured hook will not fire",
+      "Codex feature flag `hooks` is disabled — the configured hook will not fire",
     );
   }
   issues.push(...collectLowTimeoutWarnings(config));
@@ -792,6 +892,7 @@ export async function doctorCodexHook(
     checkedPaths,
     missingPaths,
     featureFlag,
+    runtimeConfig,
   };
 }
 

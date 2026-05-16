@@ -87,6 +87,20 @@ describe("installCodexHook", () => {
       hooksPath,
       `${JSON.stringify({
         hooks: {
+          PermissionRequest: [
+            {
+              matcher: "^Bash$",
+              hooks: [
+                {
+                  type: "command",
+                  command: "python3 /tmp/permission.py",
+                  commandWindows: "powershell -File C:\\tmp\\permission.ps1",
+                  async: true,
+                },
+                { type: "agent" },
+              ],
+            },
+          ],
           SessionStart: [
             {
               hooks: [{ type: "command", command: "echo session" }],
@@ -109,11 +123,20 @@ describe("installCodexHook", () => {
 
     const result = await installCodexHook(hooksPath);
     const parsed = JSON.parse(await readFile(hooksPath, "utf8")) as {
-      hooks: Record<string, Array<{ matcher?: string; hooks: Array<{ command: string; statusMessage?: string }> }>>;
+      hooks: Record<string, Array<{ matcher?: string; hooks: Array<Record<string, unknown>> }>>;
     };
 
     expect(result.hooksPath).toBe(hooksPath);
     expect(result.backupPath).toBe(`${hooksPath}.bak`);
+    expect(parsed.hooks.PermissionRequest?.[0]?.hooks).toEqual([
+      {
+        type: "command",
+        command: "python3 /tmp/permission.py",
+        commandWindows: "powershell -File C:\\tmp\\permission.ps1",
+        async: true,
+      },
+      { type: "agent" },
+    ]);
     expect(parsed.hooks.SessionStart).toHaveLength(1);
     expect(parsed.hooks.PostToolUse).toHaveLength(2);
     expect(parsed.hooks.PostToolUse[0]?.hooks[0]?.command).toBe("echo keep-me");
@@ -265,7 +288,7 @@ describe("doctorCodexHook", () => {
     expect(report.issues).not.toContain("configured Codex hook command does not match the current recommended command");
   });
 
-  it("warns when codex_hooks feature flag is not enabled", async () => {
+  it("treats absent hooks feature flag as enabled for current Codex", async () => {
     const home = await createTempDir();
     const hooksPath = join(home, "hooks.json");
     const binDir = join(home, "bin");
@@ -277,14 +300,66 @@ describe("doctorCodexHook", () => {
     await writeFile(launcherPath, "#!/usr/bin/env bash\nexit 0\n", { encoding: "utf8", mode: 0o755 });
     await installCodexHook(hooksPath, { featureFlagConfigPath });
 
-    // featureFlagConfigPath doesn't exist → flag not enabled
+    const report = await doctorCodexHook(hooksPath, { featureFlagConfigPath });
+
+    expect(report.status).toBe("ok");
+    expect(report.featureFlag.enabled).toBe(true);
+    expect(report.featureFlag.keyPresent).toBe(false);
+    expect(report.featureFlag.defaultEnabled).toBe(true);
+    expect(report.issues).toEqual([]);
+  });
+
+  it("warns when the modern hooks feature flag is explicitly disabled", async () => {
+    const home = await createTempDir();
+    const hooksPath = join(home, "hooks.json");
+    const binDir = join(home, "bin");
+    const launcherPath = join(binDir, "tokenjuice");
+    const featureFlagConfigPath = join(home, "config.toml");
+
+    process.env.PATH = binDir;
+    await mkdir(binDir, { recursive: true });
+    await writeFile(launcherPath, "#!/usr/bin/env bash\nexit 0\n", { encoding: "utf8", mode: 0o755 });
+    await writeFile(featureFlagConfigPath, "[features]\nhooks = false\n", "utf8");
+    await installCodexHook(hooksPath, { featureFlagConfigPath });
+
     const report = await doctorCodexHook(hooksPath, { featureFlagConfigPath });
 
     expect(report.status).toBe("warn");
     expect(report.featureFlag.enabled).toBe(false);
+    expect(report.featureFlag.key).toBe("hooks");
     expect(report.issues).toContain(
-      "Codex feature flag `codex_hooks` is not enabled — the configured hook will not fire",
+      "Codex feature flag `hooks` is disabled — the configured hook will not fire",
     );
+  });
+
+  it("reports Codex approval and sandbox posture from config.toml", async () => {
+    const home = await createTempDir();
+    const hooksPath = join(home, "hooks.json");
+    const binDir = join(home, "bin");
+    const launcherPath = join(binDir, "tokenjuice");
+    const featureFlagConfigPath = join(home, "config.toml");
+
+    process.env.PATH = binDir;
+    await mkdir(binDir, { recursive: true });
+    await writeFile(launcherPath, "#!/usr/bin/env bash\nexit 0\n", { encoding: "utf8", mode: 0o755 });
+    await writeFile(
+      featureFlagConfigPath,
+      'approval_policy = "on-request"\nsandbox_mode = "workspace-write"\napprovals_reviewer = "auto_review"\n\n[features]\nhooks = true\n',
+      "utf8",
+    );
+    await installCodexHook(hooksPath, { featureFlagConfigPath });
+
+    const report = await doctorCodexHook(hooksPath, { featureFlagConfigPath });
+
+    expect(report.status).toBe("ok");
+    expect(report.featureFlag.key).toBe("hooks");
+    expect(report.runtimeConfig).toMatchObject({
+      configPath: featureFlagConfigPath,
+      configExists: true,
+      approvalPolicy: "on-request",
+      sandboxMode: "workspace-write",
+      approvalsReviewer: "auto_review",
+    });
   });
 
   it("reports disabled when the tokenjuice Codex hook is not installed", async () => {

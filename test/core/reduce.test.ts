@@ -1828,6 +1828,27 @@ describe("reduceExecution", () => {
     expect(result.stats.ratio).toBeLessThan(0.25);
   });
 
+  it("matches OpenClaw run-vitest wrappers before the generic node reducer", async () => {
+    const result = await reduceExecution({
+      toolName: "exec",
+      command: "node scripts/run-vitest.mjs src/plugins/bundled-plugin-metadata.test.ts --run",
+      combinedText: [
+        "[PLUGIN_TIMINGS] Your build spent significant time in plugin `externalize-deps`. See https://rolldown.rs/options/checks#plugintimings for more details.",
+        "[PLUGIN_TIMINGS] Your build spent significant time in plugin `inject-file-scope-variables`. See https://rolldown.rs/options/checks#plugintimings for more details.",
+        "RUN  v4.1.6 /repo",
+        " Test Files  2 passed (2)",
+        "      Tests  36 passed (36)",
+        "   Start at  22:56:34",
+        "   Duration  3.74s (transform 1.64s, setup 419ms, import 1.41s, tests 1.77s, environment 0ms)",
+      ].join("\n"),
+      exitCode: 0,
+    });
+
+    expect(result.classification.matchedReducer).toBe("tests/vitest");
+    expect(result.inlineText).toContain("Test Files  2 passed (2)");
+    expect(result.inlineText).not.toContain("[PLUGIN_TIMINGS]");
+  });
+
   it("compresses noisy pytest output while keeping failure summary", async () => {
     const passed = Array.from(
       { length: 120 },
